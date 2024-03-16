@@ -1,0 +1,262 @@
+% Stochastic Interation Filter (SIF) - implementation illustration
+% Stone Soup tracking Scenario
+% Comparison with unscented Kalman filter
+
+% ----------------------------------------------------------------------
+% Identification and Decision Making Group, Faculty of Applied Sciences,
+% University of West Bohemia, Pilsen, Czech Republic
+
+% https://idm.kky.zcu.cz/
+
+% References:
+% J. Dunik, O. Straka, M. Simandl, and E. Blasch: Random-Point-Based Filters: Analysis and Comparison in Target Tracking, IEEE Transactions on Aerospace and Electronic Systems, vol. 51, no. 2, pp. 1403-1421, 2015.
+% J. Dunik, O. Straka, and M. Simandl: Stochastic Integration Filter, IEEE Transactions on Automatic Control, vol. 58, no. 6, pp. 1561-1566, 2013.
+% https://stonesoup.readthedocs.io/en/v1.2/
+
+% (c) 2024
+
+% ----------------------------------------------------------------------
+clear; close all;
+% rng(1980)
+
+% MC settings and iteration
+MCruns = 1e3;
+% - dimensions and number of data
+nx = 4;
+nz = 2;
+N = 21; 
+% - allocation
+mcSIFrmse = zeros(nx,MCruns);
+mcUKFrmse = zeros(nx,MCruns);
+% --
+mcSIFanees = zeros(1,MCruns);
+mcUKFanees = zeros(1,MCruns);
+for mdx = 1:MCruns
+    % Data Generation and System/Model Definition
+    % - intial contition (mean and covariance matrix)
+    xm = [50; 1; 1; 1];
+    Px = diag([1.5 0.5 1.5 0.5]);   
+
+    % -- state noise properties (mean and covariance matrix)
+    q1 = 0.05;
+    q2 = q1;
+    dT = 1; % this sampling period is currently assumed to be fixed 
+    Q = blkdiag([dT^3/3 dT^2/2; dT^2/2 dT]*q1, [dT^3/3 dT^2/2; dT^2/2 dT]*q2);
+    Sq = chol(Q)';
+    wm = zeros(nx,1);
+    % -- measurement noise properties (mean and covariance matrix)
+    R = diag([0.2/180*pi, 1]);
+    Sr = chol(R)';
+    vm = zeros(nz,1); 
+    % - initialisation and true initial state for data generation
+    x = zeros(nx,N);
+    z = zeros(nx,N);
+    x(:,1) = normrnd(xm,sqrt(diag(Px)));
+    % x(:,1) = xm;
+    % -- data generation
+    for i=1:1:N
+        w = Sq*normrnd(0,1,nx,1);
+        v = Sr*normrnd(0,1,nz,1);
+        x(:,i+1)=ffunct4(x(:,i),w,i-1);
+        z(:,i)=hfunct4(x(:,i),v,i-1);
+    end
+    % -- bearings wrapping
+    z(1,:) = bearingWrapping(z(1,:));
+   
+    
+    % State Estimation by UKF and SIF
+    % - SIF parameters specification
+    Nmax = 10;
+    Nmin = 5;
+    epsproc = 5e-3;
+    SIorder = 3;
+    % - UKF parameters specification
+    kappa = 3-nx;
+    alpha = 0.5;
+    beta = 2;
+    % - allocation
+    xf_sif = zeros(nx,N);
+    xp_sif = zeros(nx,N+1);
+    Pf_sif = zeros(nx,nx,N);
+    Pp_sif = zeros(nx,nx,N+1);
+    xf_ukf = zeros(nx,N);
+    xp_ukf = zeros(nx,N+1);
+    Pf_ukf = zeros(nx,nx,N);
+    Pp_ukf = zeros(nx,nx,N+1);
+    % --
+    anees_sif = zeros(1,N);
+    anees_ukf = zeros(1,N);
+    % - SIF/UKF initialisation
+    xp_sif(:,1) = xm; 
+    Pp_sif(:,:,1) = Px;
+    xp_ukf(:,1) = xm; 
+    Pp_ukf(:,:,1) = Px;
+    
+    % - UKF/SIF recursion
+    for i=1:1:N
+    
+        % measurement update (filtering)
+        [xf_sif(:,i),Pf_sif(:,:,i)] = sifMeasurementUpdatev2(xp_sif(:,i), Pp_sif(:,:,i), vm, R, i-1, z(:,i), Nmin, Nmax, epsproc, SIorder);        
+        [xf_ukf(:,i),Pf_ukf(:,:,i)] = ukff(xp_ukf(:,i), Pp_ukf(:,:,i), z(:,i), alpha, beta, kappa, R, i-1); 
+        
+        % ANEES calculation
+        anees_sif(i) = (x(:,i)-xf_sif(:,i))'*inv(Pf_sif(:,:,i))*(x(:,i)-xf_sif(:,i));
+        anees_ukf(i) = (x(:,i)-xf_ukf(:,i))'*inv(Pf_ukf(:,:,i))*(x(:,i)-xf_ukf(:,i));
+    
+        % time update (prediction)
+        [xp_sif(:,i+1),Pp_sif(:,:,i+1)] = sifTimeUpdate(xf_sif(:,i),Pf_sif(:,:,i),wm,Q,i-1,Nmin,Nmax,epsproc,SIorder); 
+        [xp_ukf(:,i+1),Pp_ukf(:,:,i+1)] = ukfp(xf_ukf(:,i),Pf_ukf(:,:,i),alpha,beta,kappa,Q,i-1); 
+    
+    end
+    
+    % average RMSE and ANEES calculation
+    mcSIFrmse(:,mdx) = sqrt(mean((xf_sif(:,1:N)-x(:,1:N)).^2,2));
+    mcUKFrmse(:,mdx) = sqrt(mean((xf_ukf(:,1:N)-x(:,1:N)).^2,2));
+    % --
+    mcSIFanees(:,mdx) = mean(anees2);
+    mcUKFanees(:,mdx) = mean(aneesUKF);
+    
+    %{
+    figure
+    subplot(2,2,1)
+    plot(x(1,:),'b')
+    hold on
+    plot(xf_sif(1,:),'r')
+    plot(xf_ukf(1,:),'g')
+    legend('true','SIF','UKF')
+    title('x1')
+    subplot(2,2,2)
+    plot(x(2,:),'b')
+    hold on
+    plot(xf_sif(2,:),'r')
+    plot(xf_ukf(2,:),'g')
+    title('x2')
+    %--
+    subplot(2,2,3)
+    plot(x(3,:),'b')
+    hold on
+    plot(xf(3,:),'r')
+    plot(xfUKF(3,:),'g')
+    title('x3')
+    subplot(2,2,4)
+    plot(x(4,:),'b')
+    hold on
+    plot(xf(4,:),'r')
+    plot(xfUKF(4,:),'g')
+    title('x4')
+    pause
+    %}
+end
+
+
+% disp('aver RMSE (MC): SIF, SIF2, UKF')
+% disp([mean(mcSIFrmse, 2), mean(mcSIF2rmse, 2), mean(mcUKFrmse, 2)])
+% disp('median RMSE (MC): SIF, SIF2, UKF')
+% disp([median(mcSIFrmse, 2), median(mcSIF2rmse, 2), median(mcUKFrmse, 2)])
+% disp('ANEES (MC): SIF, SIF2, UKF')
+% disp([mean(mcSIFanees), mean(mcSIF2anees), mean(mcUKFanees)])
+
+disp('aver RMSE (MC): SIF, UKF')
+disp([mean(mcSIFrmse, 2), mean(mcUKFrmse, 2)])
+disp('median RMSE (MC): SIF, UKF')
+disp([median(mcSIFrmse, 2), median(mcUKFrmse, 2)])
+disp('ANEES (MC): SIF, UKF')
+disp([mean(mcSIFanees), mean(mcUKFanees)])
+
+
+figure
+h=histogram(mcSIFrmse);
+hold on
+histogram(mcUKFrmse,'BinEdges',h.BinEdges)
+legend('SIF','UKF')
+
+
+% disp('aver RMSE (MC): SIF, UKF')
+% disp([mean(mcSIFrmse, 2), mean(mcUKFrmse, 2)])
+% disp('ANEES (MC): SIF, UKF')
+% disp([mean(mcSIFanees), mean(mcUKFanees)])
+
+
+
+return
+
+figure
+subplot(2,2,1)
+plot(x(1,:),'b')
+hold on
+plot(xf_sif(1,:),'r')
+plot(xf_ukf(1,:),'g')
+legend('true','SIF','UKF')
+title('x1')
+subplot(2,2,2)
+plot(x(2,:),'b')
+hold on
+plot(xf_sif(2,:),'r')
+plot(xf_ukf(2,:),'g')
+title('x2')
+%--
+subplot(2,2,3)
+plot(x(3,:),'b')
+hold on
+plot(xf_sif(3,:),'r')
+plot(xf_ukf(3,:),'g')
+title('x3')
+subplot(2,2,4)
+plot(x(4,:),'b')
+hold on
+plot(xf_sif(4,:),'r')
+plot(xf_ukf(4,:),'g')
+title('x4')
+
+
+return
+
+
+% TODO - smoothing update
+xs = zeros(nx,N);
+Ps = zeros(nx,nx,N);
+xs(:,N) = xf_sif(:,N);
+Ps(:,:,N) = Pf_sif(:,:,N);
+for i=N-1:-1:1
+    [xs(:,i), Ps(:,:,i)] = sifRTSsmoothingUpdate(xf_sif(:,i), Pf_sif(:,:,i), xp_sif(:,i+1), Pp_sif(:,:,i+1), xs(:,i+1), Ps(:,:,i+1), wm, i-1, Nmin, Nmax, epsproc, SIorder);
+end
+
+
+
+figure
+subplot(2,2,1)
+plot(x(1,:),'b')
+hold on
+plot(xf_sif(1,:),'r')
+plot(xp_sif(1,:),'g')
+plot(xs(1,:),'c')
+legend('true','filt','pred','smooth')
+title('x1')
+subplot(2,2,2)
+plot(x(2,:),'b')
+hold on
+plot(xf_sif(2,:),'r')
+plot(xp_sif(2,:),'g')
+plot(xs(2,:),'c')
+legend('true','filt','pred','smooth')
+title('x2')
+%--
+subplot(2,2,3)
+plot(x(1,1:N)-xf_sif(1,1:N),'r')
+hold on
+plot(x(1,1:N)-xp_sif(1,1:N),'g')
+plot(x(1,1:N)-xs(1,1:N),'c')
+legend('filt','pred','smooth')
+title('x1 - error')
+subplot(2,2,4)
+plot(x(2,1:N)-xf_sif(2,1:N),'r')
+hold on
+plot(x(2,1:N)-xp_sif(2,1:N),'g')
+plot(x(2,1:N)-xs(2,1:N),'c')
+legend('filt','pred','smooth')
+title('x2 - error')
+
+disp('RMSE x1: pred, filt, smooth')
+disp([sqrt(mean((x(1,1:N)-xp_sif(1,1:N)).^2)), sqrt(mean((x(1,1:N)-xf_sif(1,1:N)).^2)),sqrt(mean((x(1,1:N)-xs(1,1:N)).^2))])
+disp('RMSE x2: pred, filt, smooth')
+disp([sqrt(mean((x(2,1:N)-xp_sif(2,1:N)).^2)), sqrt(mean((x(2,1:N)-xf_sif(2,1:N)).^2)),sqrt(mean((x(2,1:N)-xs(2,1:N)).^2))])
